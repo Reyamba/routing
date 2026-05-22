@@ -10,10 +10,10 @@ $statusMessage = '';
 $statusType = 'success';
 if (isset($_GET['status'])) {
     switch ($_GET['status']) {
-        case 'upload_success': $statusMessage = 'Document uploaded to pending successfully.'; break;
+        case 'upload_success': $statusMessage = 'Document submitted to pending successfully.'; break;
         case 'send_success':   $statusMessage = 'Document sent successfully.'; break;
         case 'update_success': $statusMessage = 'Pending document updated successfully.'; break;
-        case 'upload_error':   $statusMessage = 'Upload failed. Please try again.'; $statusType = 'danger'; break;
+        case 'upload_error':   $statusMessage = 'Submission failed. Please try again.'; $statusType = 'danger'; break;
         case 'send_error':     $statusMessage = 'Unable to send document. Please try again.'; $statusType = 'danger'; break;
         case 'update_error':   $statusMessage = 'Unable to update document. Please try again.'; $statusType = 'danger'; break;
     }
@@ -22,6 +22,10 @@ if (isset($_GET['status'])) {
 $result = $conn->query("SHOW COLUMNS FROM documents LIKE 'route_state'");
 if ($result && $result->num_rows === 0) {
     $conn->query("ALTER TABLE documents ADD COLUMN route_state VARCHAR(32) NOT NULL DEFAULT 'Pending'");
+}
+$result = $conn->query("SHOW COLUMNS FROM documents LIKE 'submitted_via'");
+if ($result && $result->num_rows === 0) {
+    $conn->query("ALTER TABLE documents ADD COLUMN submitted_via VARCHAR(64) NULL");
 }
 
 $currentUser = $_SESSION['username'];
@@ -67,7 +71,6 @@ if ($usersResult && $usersResult->num_rows > 0) {
         th, td { padding:14px 16px; border-bottom:1px solid var(--border-color); text-align:left; }
         th { font-size:.82rem; text-transform:uppercase; letter-spacing:.05em; color:var(--text-muted); }
         .icon-btn { background:transparent; border:none; cursor:pointer; padding:6px; font-size:1rem; }
-        .icon-btn.edit { color: var(--primary-color); }
         .icon-btn.send { color: #16a34a; }
         .modal { display:none; position:fixed; inset:0; background:rgba(15,23,42,.5); justify-content:center; align-items:center; padding:24px; z-index:1000; }
         .modal-content { width:100%; max-width:680px; background:white; border-radius:18px; padding:24px; }
@@ -85,6 +88,7 @@ if ($usersResult && $usersResult->num_rows > 0) {
         .empty-state { padding:44px; text-align:center; color:var(--text-muted); }
         .toast { position:fixed; top:16px; right:16px; padding:12px 16px; border-radius:10px; color:white; font-weight:600; z-index:2000; }
         .toast.success { background:var(--success-color); } .toast.error { background:var(--danger-color); }
+        .badge-via { display:inline-block; padding:4px 10px; border-radius:999px; font-size:.78rem; font-weight:600; background:#eef2ff; color:#3730a3; }
     </style>
 </head>
 <body>
@@ -102,7 +106,7 @@ if ($usersResult && $usersResult->num_rows > 0) {
         <div class="header">
             <h1>Pending Documents</h1>
             <button type="button" class="action-btn" onclick="openUploadModal()">
-                <i class="fas fa-upload"></i> Upload Document
+                <i class="fas fa-plus"></i> New Document
             </button>
         </div>
         <?php if ($statusMessage): ?>
@@ -112,7 +116,7 @@ if ($usersResult && $usersResult->num_rows > 0) {
             <?php if ($pendingDocuments && $pendingDocuments->num_rows > 0): ?>
                 <table id="documentsTable">
                     <thead><tr>
-                        <th>Title</th><th>Status</th><th>Date</th><th>File Info</th><th>Remarks</th><th>Route State</th><th>Send</th>
+                        <th>Title</th><th>Status</th><th>Date</th><th>Submitted Via</th><th>Remarks</th><th>Route State</th><th>Send</th>
                     </tr></thead>
                     <tbody>
                     <?php while ($row = $pendingDocuments->fetch_assoc()):
@@ -122,29 +126,15 @@ if ($usersResult && $usersResult->num_rows > 0) {
                             'status' => $row['status'],
                             'receiver_name' => $row['receiver_name'] ?? '',
                             'remarks' => $row['remarks'] ?? '',
+                            'submitted_via' => $row['submitted_via'] ?? '',
                         ]), ENT_QUOTES, 'UTF-8');
-                        
-                        // File info display
-                        $fileInfo = '';
-                        if (!empty($row['file_path'])) {
-                            $fileName = htmlspecialchars($row['doc_name'] ?? basename($row['file_path']));
-                            $fileSize = $row['file_size'] ? number_format($row['file_size'] / 1024, 1) . ' KB' : '';
-                            $fileType = htmlspecialchars($row['type'] ?? '');
-                            
-                            $fileInfo = '<div style="font-size:.85rem;">';
-                            $fileInfo .= '<i class="fas fa-file" style="color:#6b7280;"></i> ' . $fileName;
-                            if ($fileSize) $fileInfo .= '<br><small style="color:#6b7280;">' . $fileSize . '</small>';
-                            if ($fileType) $fileInfo .= '<br><small style="color:#6b7280;">' . strtoupper($fileType) . '</small>';
-                            $fileInfo .= '</div>';
-                        } else {
-                            $fileInfo = '<span style="color:#6b7280;font-size:.85rem;">No file attached</span>';
-                        }
+                        $via = $row['submitted_via'] ?? '';
                     ?>
                         <tr>
                             <td><?php echo htmlspecialchars($row['title']); ?></td>
                             <td><?php echo htmlspecialchars($row['status']); ?></td>
                             <td><?php echo htmlspecialchars($row['created_at']); ?></td>
-                            <td><?php echo $fileInfo; ?></td>
+                            <td><?php echo $via ? '<span class="badge-via">'.htmlspecialchars($via).'</span>' : '<span style="color:#6b7280;font-size:.85rem;">—</span>'; ?></td>
                             <td><?php echo htmlspecialchars($row['remarks']); ?></td>
                             <td><?php echo htmlspecialchars($row['route_state'] ?? 'Pending'); ?></td>
                             <td>
@@ -210,23 +200,28 @@ if ($usersResult && $usersResult->num_rows > 0) {
     </div>
 </div>
 
-<!-- Upload Modal -->
+<!-- New Document Modal (no file upload) -->
 <div id="uploadModal" class="modal">
     <div class="modal-content">
         <div class="modal-header">
-            <h3>Upload Document</h3>
+            <h3>New Document</h3>
             <button class="modal-close" onclick="closeUploadModal()"><i class="fas fa-times"></i></button>
         </div>
-        <form id="uploadForm" enctype="multipart/form-data">
-            <div class="form-group">
-                <label for="upFile">File</label>
-                <input type="file" id="upFile" name="document" required>
-            </div>
+        <form id="uploadForm">
             <div class="form-group">
                 <label for="upTitle">Title</label>
-                <input type="text" id="upTitle" name="title" placeholder="Defaults to file name">
+                <input type="text" id="upTitle" name="title" required placeholder="Document title">
             </div>
             <div class="form-row">
+                <div class="form-group">
+                    <label for="upSubmittedVia">Submitted Via</label>
+                    <select id="upSubmittedVia" name="submitted_via" required>
+                        <option value="" disabled selected>Select submission channel</option>
+                        <option value="Official PSA Email">Official PSA Email</option>
+                        <option value="Hardcopy">Hardcopy</option>
+                        <option value="Facebook Messenger">Facebook Messenger</option>
+                    </select>
+                </div>
                 <div class="form-group">
                     <label for="upStatus">Status</label>
                     <select id="upStatus" name="status">
@@ -239,19 +234,15 @@ if ($usersResult && $usersResult->num_rows > 0) {
                         <option value="Specify">Specify</option>
                     </select>
                 </div>
-                <div class="form-group">
-                    <label for="upReceiver">Receiver (optional)</label>
-                    <select id="upReceiver" name="receiver">
-                        <option value="">— None —</option>
-                        <?php foreach ($users as $u): ?>
-                            <option value="<?php echo htmlspecialchars($u); ?>"><?php echo htmlspecialchars($u); ?></option>
-                        <?php endforeach; ?>
-                    </select>
-                </div>
             </div>
             <div class="form-group">
-                <label for="upDate">Date Received (optional)</label>
-                <input type="datetime-local" id="upDate" name="date_received">
+                <label for="upReceiver">Receiver (optional)</label>
+                <select id="upReceiver" name="receiver">
+                    <option value="">— None —</option>
+                    <?php foreach ($users as $u): ?>
+                        <option value="<?php echo htmlspecialchars($u); ?>"><?php echo htmlspecialchars($u); ?></option>
+                    <?php endforeach; ?>
+                </select>
             </div>
             <div class="form-group">
                 <label for="upRemarks">Remarks</label>
@@ -259,7 +250,7 @@ if ($usersResult && $usersResult->num_rows > 0) {
             </div>
             <div class="form-actions">
                 <button type="button" class="btn-cancel" onclick="closeUploadModal()">Cancel</button>
-                <button type="submit" class="btn-submit">Upload</button>
+                <button type="submit" class="btn-submit">Save</button>
             </div>
         </form>
     </div>
@@ -308,8 +299,8 @@ function closeUploadModal() { document.getElementById('uploadModal').style.displ
 document.getElementById('uploadForm').addEventListener('submit', async function(e) {
     e.preventDefault();
     const fd = new FormData(this);
-    if (!fd.get('document') || !fd.get('document').name) {
-        showToast('Please choose a file to upload.', 'error');
+    if (!fd.get('title') || !fd.get('submitted_via')) {
+        showToast('Title and Submitted Via are required.', 'error');
         return;
     }
     try {
@@ -319,7 +310,7 @@ document.getElementById('uploadForm').addEventListener('submit', async function(
             closeUploadModal();
             window.location.href = 'pending.php?status=upload_success';
         } else {
-            showToast(j.message || 'Upload failed', 'error');
+            showToast(j.message || 'Save failed', 'error');
         }
     } catch (err) {
         showToast('Network error', 'error');
