@@ -7,6 +7,12 @@ if (!isset($_SESSION['username'])) {
 require_once __DIR__ . '/db_helpers.php';
 ensure_schema($conn);
 
+// Ensure submitted_via column exists
+$colCheck = $conn->query("SHOW COLUMNS FROM documents LIKE 'submitted_via'");
+if ($colCheck && $colCheck->num_rows === 0) {
+    $conn->query("ALTER TABLE documents ADD COLUMN submitted_via VARCHAR(64) NULL");
+}
+
 $docId = isset($_GET['id']) ? intval($_GET['id']) : 0;
 $stmt = $conn->prepare('SELECT * FROM documents WHERE id = ? LIMIT 1');
 $stmt->bind_param('i', $docId);
@@ -17,6 +23,16 @@ $stmt->close();
 if (!$doc) {
     header('Location: dashboard.php');
     exit;
+}
+
+// Auto-mark this document as read when viewing its history
+$readCheck = $conn->query("SHOW COLUMNS FROM documents LIKE 'is_read'");
+if ($readCheck && $readCheck->num_rows > 0 && intval($doc['is_read'] ?? 0) === 0) {
+    $markStmt = $conn->prepare('UPDATE documents SET is_read = 1 WHERE id = ?');
+    $markStmt->bind_param('i', $docId);
+    $markStmt->execute();
+    $markStmt->close();
+    $doc['is_read'] = 1;
 }
 
 $allowedReturnPages = ['dashboard.php', 'incoming.php', 'outgoing.php'];
@@ -35,13 +51,8 @@ if (!$returnTo) {
     $returnTo = 'dashboard.php';
 }
 
-// Gather ALL related document rows so the timeline shows the complete
-// lifecycle: Sent, Received, Returned, Forwarded, Edited, Remarks, etc.
-// Strategy: walk the chain via parent_id (if column exists) AND match by title,
-// so forwards/returns to other users are all captured.
 $ids = [intval($doc['id'])];
 
-// 1) Same title — covers forwards/returns that reuse the title across rows
 $find = $conn->prepare("SELECT id FROM documents WHERE title = ?");
 $t = $doc['title'];
 $find->bind_param('s', $t);
@@ -50,7 +61,6 @@ $res = $find->get_result();
 while ($row = $res->fetch_assoc()) { $ids[] = intval($row['id']); }
 $find->close();
 
-// 2) Follow parent_id chain if the column exists (forwarded/returned copies)
 $hasParent = false;
 $colCheck = $conn->query("SHOW COLUMNS FROM documents LIKE 'parent_id'");
 if ($colCheck && $colCheck->num_rows > 0) { $hasParent = true; }
@@ -114,6 +124,7 @@ h1 { font-size:1.6rem; margin-bottom:8px; }
 .event p { color:var(--muted); font-size:.85rem; }
 .event time { color:var(--muted); font-size:.78rem; }
 .back { display:inline-flex; align-items:center; gap:8px; color:var(--primary-color); text-decoration:none; margin-bottom:16px; font-weight:600; }
+.badge-via { display:inline-block; padding:3px 10px; border-radius:999px; font-size:.78rem; font-weight:800; background:#eef2ff; color:#3730a3; }
 </style>
 </head>
 <body>
@@ -126,6 +137,7 @@ h1 { font-size:1.6rem; margin-bottom:8px; }
       <div><span>Sender</span><strong><?php echo htmlspecialchars($doc['sender_name'] ?? '—'); ?></strong></div>
       <div><span>Receiver</span><strong><?php echo htmlspecialchars($doc['receiver_name'] ?? '—'); ?></strong></div>
       <div><span>Status</span><strong><?php echo htmlspecialchars($doc['status']); ?></strong></div>
+      <div><span>Submitted Via</span><strong><?php echo !empty($doc['submitted_via']) ? '<span class="badge-via">'.htmlspecialchars($doc['submitted_via']).'</span>' : '—'; ?></strong></div>
       <div><span>Received At</span><strong><?php echo htmlspecialchars($doc['date_time_receiving'] ?? '—'); ?></strong></div>
     </div>
     <h3 style="margin-bottom:12px;">Routing history</h3>
@@ -141,11 +153,12 @@ h1 { font-size:1.6rem; margin-bottom:8px; }
           'returned'  => 'fa-rotate-left',
           'return'    => 'fa-rotate-left',
           'edited'    => 'fa-pen',
-          'filereplaced' => 'fa-file-arrow-up',
           'remarksupdated' => 'fa-comment-dots',
         ];
         while ($h = $history->fetch_assoc()):
           $actKey = strtolower(str_replace([' ', '_'], '', $h['action']));
+          // Skip legacy file-replacement events since file uploads are removed
+          if ($actKey === 'filereplaced') continue;
           $icon = $iconMap[$actKey] ?? 'fa-circle-info';
         ?>
           <?php
