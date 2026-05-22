@@ -23,3 +23,4 @@ Drop these files into your project (next to your existing `config.php`).
 3. Receiver's **Dashboard** lists all Received docs with a **History** button showing the full timeline.
 
 No DB migration needed — `ensure_schema()` runs on every request that needs it.
+
