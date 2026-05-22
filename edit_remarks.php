@@ -63,3 +63,4 @@ if (!$ok) {
                        '" . $conn->real_escape_string($remarks) . "', NOW())");
 
 echo json_encode(['success' => true]);
+
