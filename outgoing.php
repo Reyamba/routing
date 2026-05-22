@@ -19,21 +19,39 @@ $incomingCountStmt->execute();
 $incomingCountResult = $incomingCountStmt->get_result();
 $totalIncomingCount = $incomingCountResult->fetch_assoc()['total_count'];
 $incomingCountStmt->close();
-// Show only outgoing docs that the receiver has NOT yet marked as received.
-// Once acknowledged, the document disappears from the sender's Outgoing page
-// but remains visible to everyone in dashboard.php for transparency.
+// Show outgoing docs the current user sent (originally or via forward)
+// that the receiver has NOT yet marked as received.
 $stmt = $conn->prepare("
     SELECT o.*
     FROM documents o
-    WHERE o.route_state = 'Outgoing'
-      AND o.sender_name = ?
+    WHERE o.sender_name = ?
+    
+      -- Only active outgoing docs
+      AND o.route_state IN ('Outgoing','Incoming')
+
+      -- Hide if already returned
+      AND o.route_state != 'Returned'
+
+      -- Hide if already forwarded
       AND NOT EXISTS (
-          SELECT 1 FROM documents r
-          WHERE r.route_state   = 'Received'
-            AND r.title         = o.title
-            AND r.sender_name   = o.sender_name
-            AND r.receiver_name = o.receiver_name
+          SELECT 1
+          FROM document_history h
+          WHERE h.document_id = o.id
+            AND h.action = 'Forward'
       )
+
+      -- Hide if already received
+      AND NOT EXISTS (
+          SELECT 1
+          FROM documents r
+          WHERE r.title = o.title
+            AND r.route_state = 'Received'
+            AND (
+                r.sender_name = o.receiver_name
+                OR r.receiver_name = o.receiver_name
+            )
+      )
+
     ORDER BY o.created_at DESC
 ");
 $stmt->bind_param('s', $senderName);
@@ -73,6 +91,7 @@ $stmt->close();
         .badge { display:inline-block; padding:4px 10px; border-radius:999px; font-size:.75rem; font-weight:600; }
         .badge.delivered { background:#dcfce7; color:#166534; }
         .badge.sent { background:#fef3c7; color:#92400e; }
+        .badge.forwarded { background:#e0e7ff; color:#3730a3; margin-left:6px; }
         .action-btn { display:inline-flex; align-items:center; gap:6px; padding:6px 10px; border-radius:8px; background:#f3f4f6; color:#374151; text-decoration:none; font-size:.8rem; font-weight:600; }
     </style>
 </head>
@@ -85,9 +104,7 @@ $stmt->close();
             <a href="incoming.php" class="menu-item">
                 <i class="fas fa-arrow-down"></i>
                 <span>Incoming</span>
-                <?php if ($totalIncomingCount > 0): ?>
-                    <span style="background:#3b82f6;color:white;padding:2px 6px;border-radius:10px;font-size:.7rem;margin-left:auto;"><?php echo $totalIncomingCount; ?></span>
-                <?php endif; ?>
+                <span id="incomingBadge" data-count="<?php echo (int)$totalIncomingCount; ?>" style="background:#3b82f6;color:white;padding:2px 6px;border-radius:10px;font-size:.7rem;margin-left:auto;<?php echo $totalIncomingCount > 0 ? '' : 'display:none;'; ?>"><?php echo (int)$totalIncomingCount; ?></span>
             </a>
             <a href="outgoing.php" class="menu-item active"><i class="fas fa-arrow-up"></i><span>Outgoing</span></a>
             <a href="pending.php" class="menu-item"><i class="fas fa-clock"></i><span>Pending</span></a>
@@ -98,7 +115,7 @@ $stmt->close();
         <div class="content-card">
             <?php if ($outgoingDocuments && $outgoingDocuments->num_rows > 0): ?>
                 <div class="table-container"><table>
-                    <thead><tr><th>Title</th><th>Status</th><th>Receiver</th><th>Sent At</th><th>File Info</th><th>Receipt</th><th>Remarks</th><th>Action</th></tr></thead>
+                    <thead><tr><th>Title</th><th>Status</th><th>Receiver</th><th>Sent At</th><th>Submitted Via</th><th>Receipt</th><th>Remarks</th><th>Action</th></tr></thead>
                     <tbody>
                     <?php while ($row = $outgoingDocuments->fetch_assoc()):
                         // Has the receiver acknowledged? Look for a Received row matching title+receiver+sender.
@@ -110,28 +127,27 @@ $stmt->close();
                         if ($ar && $arow = $ar->fetch_assoc()) { $ack = $arow['date_time_receiving']; }
                         $a->close();
                         
-                        // File info display
-                        $fileInfo = '';
-                        if (!empty($row['file_path'])) {
-                            $fileName = htmlspecialchars($row['doc_name'] ?? basename($row['file_path']));
-                            $fileSize = $row['file_size'] ? number_format($row['file_size'] / 1024, 1) . ' KB' : '';
-                            $fileType = htmlspecialchars($row['type'] ?? '');
-                            
-                            $fileInfo = '<div style="font-size:.85rem;">';
-                            $fileInfo .= '<i class="fas fa-file" style="color:#6b7280;"></i> ' . $fileName;
-                            if ($fileSize) $fileInfo .= '<br><small style="color:#6b7280;">' . $fileSize . '</small>';
-                            if ($fileType) $fileInfo .= '<br><small style="color:#6b7280;">' . strtoupper($fileType) . '</small>';
-                            $fileInfo .= '</div>';
+                        // Submitted via display
+                        $submittedVia = trim((string)($row['submitted_via'] ?? ''));
+                        if ($submittedVia !== '') {
+                            $iconMap = [
+                                'Official PSA Email'   => 'fa-envelope',
+                                'Hardcopy'             => 'fa-file-lines',
+                                'Facebook Messenger'   => 'fa-facebook-messenger',
+                            ];
+                            $icon = $iconMap[$submittedVia] ?? 'fa-inbox';
+                            $iconPrefix = ($submittedVia === 'Facebook Messenger') ? 'fab' : 'fas';
+                            $submittedViaDisplay = '<div style="font-size:.85rem;"><i class="' . $iconPrefix . ' ' . $icon . '" style="color:#6b7280;"></i> ' . htmlspecialchars($submittedVia) . '</div>';
                         } else {
-                            $fileInfo = '<span style="color:#6b7280;font-size:.85rem;">No file attached</span>';
+                            $submittedViaDisplay = '<span style="color:#6b7280;font-size:.85rem;">—</span>';
                         }
                     ?>
                         <tr>
-                            <td><?php echo htmlspecialchars($row['title']); ?></td>
+                            <td><?php echo htmlspecialchars($row['title']); ?><?php if (!empty($row['is_forwarded'])): ?> <span class="badge forwarded"><i class="fas fa-share"></i> Forwarded</span><?php endif; ?></td>
                             <td><?php echo htmlspecialchars($row['status']); ?></td>
                             <td><?php echo htmlspecialchars($row['receiver_name']); ?></td>
                             <td><?php echo htmlspecialchars($row['created_at']); ?></td>
-                            <td><?php echo $fileInfo; ?></td>
+                            <td><?php echo $submittedViaDisplay; ?></td>
                             <td>
                                 <?php if ($ack): ?>
                                     <span class="badge delivered">Received <?php echo htmlspecialchars($ack); ?></span>
@@ -151,5 +167,44 @@ $stmt->close();
         </div>
     </main>
 </div>
+<script>
+(function(){
+    var badge = document.getElementById('incomingBadge');
+    if (!badge) return;
+    var lastCount = parseInt(badge.getAttribute('data-count') || '0', 10);
+    var reloadOnIncrease = false;
+
+    function ensureToast(msg){
+        var t = document.createElement('div');
+        t.textContent = msg;
+        t.style.cssText = 'position:fixed;top:20px;right:20px;background:#3b82f6;color:#fff;padding:12px 18px;border-radius:8px;font-family:Inter,sans-serif;font-size:.9rem;font-weight:600;box-shadow:0 6px 18px rgba(0,0,0,.15);z-index:9999;';
+        document.body.appendChild(t);
+        setTimeout(function(){ t.remove(); }, 3500);
+    }
+
+    function tick(){
+        fetch('incoming_count.php', { credentials: 'same-origin', cache: 'no-store' })
+            .then(function(r){ return r.json(); })
+            .then(function(j){
+                if (!j || j.auth === false) return;
+                var c = parseInt(j.count || 0, 10);
+                badge.setAttribute('data-count', c);
+                badge.textContent = c;
+                badge.style.display = c > 0 ? '' : 'none';
+                if (c > lastCount) {
+                    var diff = c - lastCount;
+                    ensureToast(diff + ' new incoming document' + (diff>1?'s':''));
+                    if (reloadOnIncrease) {
+                        setTimeout(function(){ location.reload(); }, 1200);
+                    }
+                }
+                lastCount = c;
+            })
+            .catch(function(){});
+    }
+    setInterval(tick, 8000);
+})();
+</script>
+
 </body>
 </html>
