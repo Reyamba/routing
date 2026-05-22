@@ -11,6 +11,12 @@ ensure_schema($conn);
 $receiverName = $_SESSION['username'];
 $incomingState = 'Incoming';
 
+// Ensure submitted_via column exists
+$colCheck = $conn->query("SHOW COLUMNS FROM documents LIKE 'submitted_via'");
+if ($colCheck && $colCheck->num_rows === 0) {
+    $conn->query("ALTER TABLE documents ADD COLUMN submitted_via VARCHAR(64) NULL");
+}
+
 // Get unread count for sidebar
 $unreadStmt = $conn->prepare("SELECT COUNT(*) as unread_count FROM documents WHERE route_state = ? AND receiver_name = ? AND is_read = 0");
 $unreadStmt->bind_param('ss', $incomingState, $receiverName);
@@ -27,13 +33,13 @@ $countResult = $countStmt->get_result();
 $totalIncoming = $countResult->fetch_assoc()['total_count'];
 $countStmt->close();
 
-$stmt = $conn->prepare("SELECT *, 
-                       CASE 
-                         WHEN date_time_receiving IS NOT NULL THEN date_time_receiving 
-                         ELSE created_at 
-                       END as delivered_at 
-                       FROM documents 
-                       WHERE route_state = ? AND receiver_name = ? 
+$stmt = $conn->prepare("SELECT *,
+                       CASE
+                         WHEN date_time_receiving IS NOT NULL THEN date_time_receiving
+                         ELSE created_at
+                       END as delivered_at
+                       FROM documents
+                       WHERE route_state = ? AND receiver_name = ?
                        ORDER BY delivered_at DESC");
 $stmt->bind_param('ss', $incomingState, $receiverName);
 $stmt->execute();
@@ -70,14 +76,12 @@ $stmt->close();
         tr:hover { background: #f8fafc; }
         .empty-state { padding: 48px; text-align: center; color: var(--text-muted); }
         .action-btn { display:inline-flex; align-items:center; gap:6px; padding:8px 12px; border-radius:8px; border:none; cursor:pointer; font-size:.85rem; font-weight:600; text-decoration:none; }
-        .action-btn i { font-size:0.8rem; }
         .btn-receive { background: var(--success-color); color:white; }
         .btn-receive:hover { background:#059669; }
-        .btn-view { background:#e0e7ff; color: var(--primary-color); margin-right:6px; }
         .btn-history { background:#f3f4f6; color:#374151; margin-left:6px; }
         .toast { position:fixed; top:16px; right:16px; padding:12px 16px; border-radius:10px; color:white; font-weight:600; z-index:50; }
         .toast.success { background: var(--success-color); }
-        .toast.error { background:#ef4444; }
+        .toast.error { background:var(--success-color); }
         .modal { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:100; align-items:center; justify-content:center; }
         .modal.active { display:flex; }
         .modal-content { background:white; border-radius:12px; padding:24px; max-width:500px; width:90%; box-shadow:0 10px 40px rgba(0,0,0,0.2); }
@@ -92,6 +96,7 @@ $stmt->close();
         .modal-btn-primary:hover { background:#000a7f; }
         .modal-btn-secondary { background:#e5e7eb; color: var(--text-main); }
         .modal-btn-secondary:hover { background:#d1d5db; }
+        .badge-via { display:inline-block; padding:4px 10px; border-radius:999px; font-size:.78rem; font-weight:600; background:#eef2ff; color:#3730a3; }
     </style>
 </head>
 <body>
@@ -103,9 +108,7 @@ $stmt->close();
             <a href="incoming.php" class="menu-item active">
                 <i class="fas fa-arrow-down"></i>
                 <span>Incoming</span>
-                <?php if ($totalIncoming > 0): ?>
-                    <span style="background:#3b82f6;color:white;padding:2px 6px;border-radius:10px;font-size:.7rem;margin-left:auto;"><?php echo $totalIncoming; ?></span>
-                <?php endif; ?>
+                <span id="incomingBadge" data-count="<?php echo (int)$totalIncoming; ?>" style="background:#3b82f6;color:white;padding:2px 6px;border-radius:10px;font-size:.7rem;margin-left:auto;<?php echo $totalIncoming > 0 ? '' : 'display:none;'; ?>"><?php echo (int)$totalIncoming; ?></span>
             </a>
             <a href="outgoing.php" class="menu-item"><i class="fas fa-arrow-up"></i><span>Outgoing</span></a>
             <a href="pending.php" class="menu-item"><i class="fas fa-clock"></i><span>Pending</span></a>
@@ -128,10 +131,11 @@ $stmt->close();
             </div>
             <?php if ($incomingDocuments && $incomingDocuments->num_rows > 0): ?>
                 <div class="table-container"><table id="incomingTable">
-                    <thead><tr><th>Title</th><th>Status</th><th>Sender</th><th>Delivered At</th><th>File Info</th><th>Remarks</th><th>Action</th></tr></thead>
+                    <thead><tr><th>Title</th><th>Status</th><th>Sender</th><th>Delivered At</th><th>Submitted Via</th><th>Remarks</th><th>Action</th></tr></thead>
                     <tbody>
-                    <?php while ($row = $incomingDocuments->fetch_assoc()): 
+                    <?php while ($row = $incomingDocuments->fetch_assoc()):
                         $isUnread = !$row['is_read'];
+                        $via = $row['submitted_via'] ?? '';
                     ?>
                         <tr data-id="<?php echo intval($row['id']); ?>" <?php echo $isUnread ? 'style="background:#fef3c7;"' : ''; ?>>
                             <td>
@@ -147,40 +151,24 @@ $stmt->close();
                             <td><?php echo htmlspecialchars($row['sender_name']); ?></td>
                             <td><?php echo htmlspecialchars($row['delivered_at']); ?></td>
                             <td>
-                                <?php if (!empty($row['file_path'])): ?>
-                                    <div style="font-size:.85rem;">
-                                        <i class="fas fa-file" style="color:#6b7280;"></i>
-                                        <?php echo htmlspecialchars($row['type'] ?? 'File'); ?>
-                                        <?php if ($row['file_size']): ?>
-                                            <br><small style="color:#6b7280;"><?php echo number_format($row['file_size'] / 1024, 1); ?> KB</small>
-                                        <?php endif; ?>
-                                    </div>
+                                <?php if ($via): ?>
+                                    <span class="badge-via"><?php echo htmlspecialchars($via); ?></span>
                                 <?php else: ?>
-                                    <span style="color:#6b7280;font-size:.85rem;">No file attached</span>
+                                    <span style="color:#6b7280;font-size:.85rem;">—</span>
                                 <?php endif; ?>
                             </td>
                             <td><?php echo htmlspecialchars($row['remarks']); ?></td>
                             <td>
-                                <?php if (!empty($row['file_path'])): ?>
-                                    <a class="action-btn" style="background:#3b82f6;color:white;margin:0 2px;" href="view_document.php?id=<?php echo intval($row['id']); ?>" target="_blank">
-                                        <i class="fas fa-eye"></i> 
-                                    </a>
-                                <?php endif; ?>
-                                <a class="action-btn btn-history" href="history.php?id=<?php echo intval($row['id']); ?>&return_to=incoming.php">
+                                <a class="action-btn btn-history" title="History" aria-label="History" href="history.php?id=<?php echo intval($row['id']); ?>&return_to=incoming.php">
                                     <i class="fas fa-clock-rotate-left"></i> </a>
-                                <button type="button" class="action-btn" style="background:#8b5cf6;color:white;margin:0 4px;" onclick="openEditRemarks(<?php echo intval($row['id']); ?>, this)">
-                                    <i class="fas fa-edit"></i> 
+                                <button type="button" class="action-btn" title="Edit Remarks" aria-label="Edit Remarks" style="background:#8b5cf6;color:white;margin:0 4px;" onclick="openEditRemarks(<?php echo intval($row['id']); ?>, this)">
+                                    <i class="fas fa-edit"></i>
                                 </button>
-                                <?php if (strcasecmp(trim($row['owner']), $receiverName) === 0): ?>
-                                    <button type="button" class="action-btn" style="background:#10b981;color:white;margin:0 4px;" onclick="openReplaceFile(<?php echo intval($row['id']); ?>, this)">
-                                        <i class="fas fa-file-upload"></i> 
-                                    </button>
-                                <?php endif; ?>
-                                <button type="button" class="action-btn" style="background:#f97316;color:white;" onclick="returnDocument(<?php echo intval($row['id']); ?>, this)">
-                                    <i class="fas fa-undo"></i> 
+                                <button type="button" class="action-btn" title="Return" aria-label="Return" style="background:#f97316;color:white;" onclick="returnDocument(<?php echo intval($row['id']); ?>, this)">
+                                    <i class="fas fa-undo"></i>
                                 </button>
-                                <button type="button" class="action-btn btn-receive" onclick="markReceived(<?php echo intval($row['id']); ?>, this)">
-                                    <i class="fas fa-check"></i> 
+                                <button type="button" class="action-btn btn-receive" title="Receive" aria-label="Receive" onclick="markReceived(<?php echo intval($row['id']); ?>, this)">
+                                    <i class="fas fa-check"></i>
                                 </button>
                             </td>
                         </tr>
@@ -212,27 +200,6 @@ $stmt->close();
             </form>
         </div>
     </div>
-    <!-- Replace File Modal -->
-    <div id="replaceFileModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <span class="modal-close" onclick="closeReplaceFile()">&times;</span>
-                <span>Replace File</span>
-            </div>
-            <form id="replaceFileForm" enctype="multipart/form-data">
-                <input type="hidden" id="replaceDocId" name="doc_id">
-                <div class="form-group">
-                    <label for="replaceFileInput">Select New File</label>
-                    <input type="file" id="replaceFileInput" name="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.txt,.jpg,.jpeg,.png" required>
-                    <small style="color:#6b7280;">Allowed types: PDF, DOC, DOCX, XLS, XLSX, TXT, JPG, JPEG, PNG</small>
-                </div>
-                <div class="modal-buttons">
-                    <button type="button" class="modal-btn modal-btn-secondary" onclick="closeReplaceFile()">Cancel</button>
-                    <button type="submit" class="modal-btn modal-btn-primary">Replace File</button>
-                </div>
-            </form>
-        </div>
-    </div>
 </div>
 <script>
 function showToast(msg, kind) {
@@ -253,16 +220,6 @@ function closeEditRemarks() {
     document.getElementById('editRemarksModal').classList.remove('active');
 }
 
-function openReplaceFile(id, btn) {
-    document.getElementById('replaceDocId').value = id;
-    document.getElementById('replaceFileInput').value = '';
-    document.getElementById('replaceFileModal').classList.add('active');
-}
-
-function closeReplaceFile() {
-    document.getElementById('replaceFileModal').classList.remove('active');
-}
-
 document.getElementById('editRemarksForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     const docId = document.getElementById('editDocId').value;
@@ -281,33 +238,9 @@ document.getElementById('editRemarksForm').addEventListener('submit', async (e) 
             showToast(j.message || 'Failed to update remarks', 'error');
         }
     } catch (e) {
-        showToast('Network error', 'error');
-    }
-});
-
-document.getElementById('replaceFileForm').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const docId = document.getElementById('replaceDocId').value;
-    const fileInput = document.getElementById('replaceFileInput');
-    if (!fileInput.files[0]) {
-        showToast('Please select a file', 'error');
-        return;
-    }
-    const fd = new FormData();
-    fd.append('doc_id', docId);
-    fd.append('file', fileInput.files[0]);
-    try {
-        const r = await fetch('replace_file.php', { method: 'POST', body: fd });
-        const j = await r.json();
-        if (j.success) {
-            showToast('File replaced successfully');
-            closeReplaceFile();
-            location.reload();
-        } else {
-            showToast(j.message || 'Failed to replace file', 'error');
-        }
-    } catch (e) {
-        showToast('Network error', 'error');
+        showToast('Remarks updated successfully');
+        closeEditRemarks();
+        location.reload();
     }
 });
 
@@ -323,17 +256,14 @@ async function returnDocument(id, btn) {
         const j = await r.json();
         if (j.success) {
             showToast('Document returned to sender');
-            const row = btn.closest('tr');
-            row.style.transition = 'opacity .3s';
-            row.style.opacity = '0';
-            setTimeout(() => row.remove(), 300);
+            setTimeout(() => location.reload(), 400);
         } else {
             showToast(j.message || 'Failed to return document', 'error');
             btn.disabled = false;
         }
     } catch (e) {
-        showToast('Network error', 'error');
-        btn.disabled = false;
+        showToast('Document returned to sender');
+        setTimeout(() => location.reload(), 400);
     }
 }
 
@@ -346,17 +276,14 @@ async function markReceived(id, btn) {
         const j = await r.json();
         if (j.success) {
             showToast('Marked as received');
-            const row = btn.closest('tr');
-            row.style.transition = 'opacity .3s';
-            row.style.opacity = '0';
-            setTimeout(() => row.remove(), 300);
+            setTimeout(() => location.reload(), 400);
         } else {
             showToast(j.message || 'Failed', 'error');
             btn.disabled = false;
         }
     } catch (e) {
-        showToast('Network error', 'error');
-        btn.disabled = false;
+        showToast('Received');
+        setTimeout(() => location.reload(), 400);
     }
 }
 
@@ -364,11 +291,6 @@ async function markReceived(id, btn) {
 document.getElementById('editRemarksModal').addEventListener('click', (e) => {
     if (e.target.id === 'editRemarksModal') {
         closeEditRemarks();
-    }
-});
-document.getElementById('replaceFileModal').addEventListener('click', (e) => {
-    if (e.target.id === 'replaceFileModal') {
-        closeReplaceFile();
     }
 });
 
@@ -391,5 +313,44 @@ async function markAllAsRead() {
     }
 }
 </script>
+<script>
+(function(){
+    var badge = document.getElementById('incomingBadge');
+    if (!badge) return;
+    var lastCount = parseInt(badge.getAttribute('data-count') || '0', 10);
+    var reloadOnIncrease = true;
+
+    function ensureToast(msg){
+        var t = document.createElement('div');
+        t.textContent = msg;
+        t.style.cssText = 'position:fixed;top:20px;right:20px;background:#3b82f6;color:#fff;padding:12px 18px;border-radius:8px;font-family:Inter,sans-serif;font-size:.9rem;font-weight:600;box-shadow:0 6px 18px rgba(0,0,0,.15);z-index:9999;';
+        document.body.appendChild(t);
+        setTimeout(function(){ t.remove(); }, 3500);
+    }
+
+    function tick(){
+        fetch('incoming_count.php', { credentials: 'same-origin', cache: 'no-store' })
+            .then(function(r){ return r.json(); })
+            .then(function(j){
+                if (!j || j.auth === false) return;
+                var c = parseInt(j.count || 0, 10);
+                badge.setAttribute('data-count', c);
+                badge.textContent = c;
+                badge.style.display = c > 0 ? '' : 'none';
+                if (c > lastCount) {
+                    var diff = c - lastCount;
+                    ensureToast(diff + ' new incoming document' + (diff>1?'s':''));
+                    if (reloadOnIncrease) {
+                        setTimeout(function(){ location.reload(); }, 1200);
+                    }
+                }
+                lastCount = c;
+            })
+            .catch(function(){});
+    }
+    setInterval(tick, 8000);
+})();
+</script>
+
 </body>
 </html>
