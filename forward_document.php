@@ -59,11 +59,15 @@ if (strcasecmp(trim($doc['route_state']), 'Received') !== 0) {
     exit;
 }
 
-// Forward: sender becomes current user, receiver becomes selected user, route_state -> Incoming
+// Forward: sender becomes current user, receiver becomes selected user.
+// route_state = 'Incoming' so the doc appears in the new receiver's Incoming page.
+// outgoing.php also includes 'Incoming' docs where sender_name = me, so the
+// forwarder still sees the forwarded doc in their Outgoing page.
 $update = $conn->prepare(
     "UPDATE documents
      SET sender_name = ?, receiver_name = ?, route_state = 'Incoming',
-         received_at = NULL, is_read = 0, remarks = ?
+         received_at = NULL, date_time_receiving = NULL, time_stamp_received = NULL,
+         is_read = 0, remarks = ?, created_at = NOW()
      WHERE id = ?"
 );
 $update->bind_param('sssi', $me, $receiver, $remarks, $docId);
