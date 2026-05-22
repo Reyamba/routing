@@ -9,6 +9,12 @@ if (!isset($_SESSION['username'])) {
 require_once __DIR__ . '/db_helpers.php';
 ensure_schema($conn);
 
+// Ensure submitted_via column exists
+$colCheck = $conn->query("SHOW COLUMNS FROM documents LIKE 'submitted_via'");
+if ($colCheck && $colCheck->num_rows === 0) {
+    $conn->query("ALTER TABLE documents ADD COLUMN submitted_via VARCHAR(64) NULL");
+}
+
 $docId = isset($_POST['doc_id']) ? intval($_POST['doc_id']) : 0;
 $receiverName = trim($_POST['receiver_name'] ?? '');
 $title = trim($_POST['title'] ?? '');
@@ -29,7 +35,7 @@ if (!$userResult || $userResult->num_rows === 0) {
     exit;
 }
 
-$stmt = $conn->prepare('SELECT title, status, remarks, created_at, sender_name, doc_name, file_path, file_size, type, owner FROM documents WHERE id = ? AND route_state = ? LIMIT 1');
+$stmt = $conn->prepare('SELECT title, status, remarks, created_at, sender_name, doc_name, submitted_via, owner FROM documents WHERE id = ? AND route_state = ? LIMIT 1');
 $pendingState = 'Pending';
 $stmt->bind_param('is', $docId, $pendingState);
 $stmt->execute();
@@ -73,11 +79,14 @@ $update->close();
 log_history($conn, $docId, 'sent', $_SESSION['username'], 'Pending', 'Outgoing',
     "Sent to {$receiverName}");
 
-// Create the receiver's Incoming copy
+// Create the receiver's Incoming copy (no file fields)
 $incomingState = 'Incoming';
 $timestamp = date('Y-m-d H:i:s');
-$insert = $conn->prepare('INSERT INTO documents (title, status, receiver_name, remarks, route_state, created_at, sender_name, doc_name, file_path, file_size, type, owner, is_read) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)');
-$insert->bind_param('ssssssssisss', $title, $status, $receiverName, $remarks, $incomingState, $timestamp, $currentSender, $document['doc_name'], $document['file_path'], $document['file_size'], $document['type'], $document['owner']);
+$insert = $conn->prepare('INSERT INTO documents (title, status, receiver_name, remarks, route_state, created_at, sender_name, doc_name, submitted_via, owner, is_read) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)');
+$insert->bind_param('ssssssssss',
+    $title, $status, $receiverName, $remarks, $incomingState, $timestamp,
+    $currentSender, $document['doc_name'], $document['submitted_via'], $document['owner']
+);
 if (!$insert->execute()) {
     echo json_encode(['success' => false, 'message' => 'Failed to create incoming document.']);
     exit;
